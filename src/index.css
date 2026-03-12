@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    @apply bg-gray-950 text-gray-100 m-0;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { @apply bg-gray-900; }
+  ::-webkit-scrollbar-thumb { @apply bg-gray-600 rounded; }
+}
+
+@layer components {
+  .panel {
+    @apply bg-gray-900 border border-gray-800 rounded-lg p-4;
+  }
+  .panel-header {
+    @apply text-xs font-bold tracking-widest text-gray-500 uppercase border-b border-gray-800 pb-2 mb-3;
+  }
+  .data-label {
+    @apply text-xs text-gray-500 uppercase tracking-wider;
+  }
+  .data-value {
+    @apply text-base font-bold text-gray-100;
+  }
+  .nav-btn {
+    @apply px-3 py-2 text-xs font-bold tracking-widest uppercase transition-all rounded
+           text-gray-400 hover:text-gray-100 hover:bg-gray-800 border border-transparent;
+  }
+  .nav-btn-active {
+    @apply text-amber-400 bg-gray-800 border-amber-400/40;
+  }
+}
