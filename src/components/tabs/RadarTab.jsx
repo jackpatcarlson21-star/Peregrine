@@ -2,181 +2,312 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-const RAINVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
-const TILE_BASE = 'https://tilecache.rainviewer.com';
-const COLOR_SCHEME = 2;   // standard NWS-style reflectivity colors
-const SMOOTH = 1;
-const SNOW = 0;
-const OPACITY = 0.75;
-const ANIM_INTERVAL_MS = 600;
+const NWS_API = 'https://api.weather.gov/radar/stations';
+const RIDGE2 = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms`;
+const RIDGE2_CAPS = (id) =>
+  `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities`;
 
-const formatUtc = (ts) => {
-  const d = new Date(ts * 1000);
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${hh}${mm}Z`;
+const PRODUCTS = [
+  { id: 'bref_raw', label: 'REFLECTIVITY' },
+  { id: 'vel_raw',  label: 'VELOCITY' },
+];
+
+const ANIM_MS = 650;
+
+// Parse ISO 8601 times out of a WMS GetCapabilities Dimension element
+const parseTimes = (xmlText) => {
+  try {
+    const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+    const dims = doc.querySelectorAll('Dimension[name="time"], dimension[name="time"]');
+    for (const dim of dims) {
+      const raw = dim.textContent.trim();
+      if (!raw) continue;
+      if (raw.includes(',')) {
+        return raw.split(',').map(t => t.trim()).filter(Boolean);
+      }
+      if (raw.includes('/')) {
+        // interval: start/end/period
+        const [start, end, period] = raw.split('/');
+        const mMatch = period.match(/PT?(\d+)M/);
+        if (!mMatch) return [start, end].filter(Boolean);
+        const stepMs = parseInt(mMatch[1]) * 60 * 1000;
+        const times = [];
+        let t = new Date(start).getTime();
+        const endT = new Date(end).getTime();
+        while (t <= endT && times.length < 60) {
+          times.push(new Date(t).toISOString().replace('.000Z', 'Z'));
+          t += stepMs;
+        }
+        return times;
+      }
+      return [raw];
+    }
+  } catch (_) {}
+  return [];
 };
 
+const fmtUtc = (iso) => {
+  if (!iso) return '----Z';
+  const d = new Date(iso);
+  return `${String(d.getUTCHours()).padStart(2,'0')}${String(d.getUTCMinutes()).padStart(2,'0')}Z`;
+};
+
+// ── component ────────────────────────────────────────────────────────────────
+
 const RadarTab = () => {
-  const mapContainerRef = useRef(null);
-  const mapRef = useRef(null);
-  const layersRef = useRef([]);
-  const animRef = useRef(null);
+  const containerRef = useRef(null);
+  const mapRef       = useRef(null);
+  const markersRef   = useRef(null);   // L.layerGroup for station dots
+  const radarRef     = useRef(null);   // current WMS tile layer
+  const animRef      = useRef(null);
 
-  const [frames, setFrames] = useState([]);
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [playing, setPlaying] = useState(true);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [stations,        setStations]        = useState([]);
+  const [selected,        setSelected]        = useState(null);
+  const [product,         setProduct]         = useState('bref_raw');
+  const [frames,          setFrames]          = useState([]);
+  const [frameIdx,        setFrameIdx]        = useState(0);
+  const [playing,         setPlaying]         = useState(false);
+  const [radarLoading,    setRadarLoading]    = useState(false);
+  const [search,          setSearch]          = useState('');
+  const [showDropdown,    setShowDropdown]    = useState(false);
 
-  // Init map once
+  // ── init map ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current) return;
-
-    const map = L.map(mapContainerRef.current, {
+    const map = L.map(containerRef.current, {
       center: [38.5, -96],
       zoom: 4,
       zoomControl: true,
       attributionControl: false,
     });
-
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 19,
+      subdomains: 'abcd', maxZoom: 19,
     }).addTo(map);
-
-    // Minimal attribution in corner
-    L.control.attribution({ prefix: false, position: 'bottomright' })
-      .addAttribution('<span style="color:#555;font-size:10px">© CartoDB · RainViewer</span>')
-      .addTo(map);
-
+    markersRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-
-    return () => {
-      map.remove();
-      mapRef.current = null;
-    };
+    return () => { map.remove(); mapRef.current = null; };
   }, []);
 
-  const fetchFrames = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  // ── load stations from NWS ──────────────────────────────────────────────────
+  useEffect(() => {
+    fetch(NWS_API, { headers: { Accept: 'application/geo+json' } })
+      .then(r => r.json())
+      .then(data => {
+        const stns = (data.features ?? [])
+          .filter(f => f.properties?.stationType === 'WSR-88D')
+          .map(f => ({
+            id:   f.properties.stationIdentifier,
+            name: f.properties.name,
+            lat:  f.geometry.coordinates[1],
+            lng:  f.geometry.coordinates[0],
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id));
+        setStations(stns);
+      })
+      .catch(console.error);
+  }, []);
+
+  // ── draw station markers ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!markersRef.current || !stations.length) return;
+    markersRef.current.clearLayers();
+    stations.forEach(stn => {
+      const sel = selected?.id === stn.id;
+      L.circleMarker([stn.lat, stn.lng], {
+        radius:      sel ? 7 : 4,
+        fillColor:   sel ? '#fbbf24' : '#6b7280',
+        color:       sel ? '#fbbf24' : '#374151',
+        weight:      1,
+        fillOpacity: sel ? 1 : 0.65,
+      })
+        .bindTooltip(`<span style="font-family:monospace;font-size:11px"><b>${stn.id}</b> ${stn.name}</span>`, {
+          direction: 'top', offset: [0, -6],
+        })
+        .on('click', () => { setSelected(stn); setSearch(''); setShowDropdown(false); })
+        .addTo(markersRef.current);
+    });
+  }, [stations, selected]);
+
+  // ── load radar when station/product changes ─────────────────────────────────
+  const loadRadar = useCallback(async (stn, prod) => {
+    if (!mapRef.current) return;
+    setRadarLoading(true);
+    setPlaying(false);
+    setFrames([]);
+
+    // remove old layer
+    if (radarRef.current) { mapRef.current.removeLayer(radarRef.current); radarRef.current = null; }
+
+    mapRef.current.setView([stn.lat, stn.lng], 7, { animate: true });
+
     try {
-      const res = await fetch(RAINVIEWER_API);
-      if (!res.ok) throw new Error('API error');
-      const data = await res.json();
-      const past = data.radar.past ?? [];
-      if (past.length === 0) throw new Error('No frames available');
-      setFrames(past);
-      setFrameIndex(past.length - 1);
+      const res = await fetch(RIDGE2_CAPS(stn.id));
+      if (!res.ok) throw new Error('caps fetch failed');
+      const xml = await res.text();
+      const times = parseTimes(xml);
+
+      const layer = L.tileLayer.wms(RIDGE2(stn.id), {
+        layers:      `${stn.id.toLowerCase()}_${prod}`,
+        format:      'image/png',
+        transparent: true,
+        version:     '1.3.0',
+        crs:         L.CRS.EPSG3857,
+        TIME:        times.length ? times[times.length - 1] : '',
+        opacity:     0.8,
+        zIndex:      10,
+      });
+      layer.addTo(mapRef.current);
+      radarRef.current = layer;
+
+      if (times.length) {
+        setFrames(times);
+        setFrameIdx(times.length - 1);
+        setPlaying(true);
+      }
     } catch (e) {
-      setError('Failed to load radar data.');
+      console.error('radar load failed', e);
     } finally {
-      setLoading(false);
+      setRadarLoading(false);
     }
   }, []);
 
-  // Initial fetch
-  useEffect(() => { fetchFrames(); }, [fetchFrames]);
-
-  // Build/rebuild tile layers when frames change
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || frames.length === 0) return;
+    if (selected) loadRadar(selected, product);
+  }, [selected, product, loadRadar]);
 
-    // Remove old layers
-    layersRef.current.forEach(l => map.removeLayer(l));
-
-    // Pre-create one layer per frame (invisible by default)
-    layersRef.current = frames.map(frame =>
-      L.tileLayer(
-        `${TILE_BASE}${frame.path}/256/{z}/{x}/{y}/${COLOR_SCHEME}/${SMOOTH}_${SNOW}.png`,
-        { opacity: 0, zIndex: 10, maxZoom: 15 }
-      ).addTo(map)
-    );
-  }, [frames]);
-
-  // Show only the current frame
+  // ── update TIME on frame change ─────────────────────────────────────────────
   useEffect(() => {
-    layersRef.current.forEach((layer, i) => {
-      layer.setOpacity(i === frameIndex ? OPACITY : 0);
-    });
-  }, [frameIndex, frames]);
+    if (radarRef.current && frames.length) {
+      radarRef.current.setParams({ TIME: frames[frameIdx] }, false);
+    }
+  }, [frameIdx, frames]);
 
-  // Animation loop
+  // ── animation loop ──────────────────────────────────────────────────────────
   useEffect(() => {
-    if (animRef.current) clearInterval(animRef.current);
-    if (playing && frames.length > 0) {
-      animRef.current = setInterval(() => {
-        setFrameIndex(i => (i + 1) % frames.length);
-      }, ANIM_INTERVAL_MS);
+    clearInterval(animRef.current);
+    if (playing && frames.length > 1) {
+      animRef.current = setInterval(
+        () => setFrameIdx(i => (i + 1) % frames.length),
+        ANIM_MS
+      );
     }
     return () => clearInterval(animRef.current);
   }, [playing, frames.length]);
 
-  const handleScrub = (e) => {
-    setPlaying(false);
-    setFrameIndex(Number(e.target.value));
-  };
+  // ── search filter ───────────────────────────────────────────────────────────
+  const filtered = search.trim()
+    ? stations.filter(s =>
+        s.id.toLowerCase().includes(search.toLowerCase()) ||
+        s.name.toLowerCase().includes(search.toLowerCase())
+      ).slice(0, 8)
+    : [];
 
-  const currentTime = frames[frameIndex] ? formatUtc(frames[frameIndex].time) : '----Z';
-  const isNewest = frameIndex === frames.length - 1;
-
+  // ── render ──────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-3" style={{ height: 'calc(100vh - 130px)' }}>
 
-      {/* Controls bar */}
-      <div className="flex items-center gap-3 shrink-0 flex-wrap">
-        <button
-          onClick={() => setPlaying(p => !p)}
-          disabled={loading || !!error}
-          className="px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border border-amber-400 text-amber-400 bg-amber-400/10 hover:bg-amber-400/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-        >
-          {playing ? '⏸ PAUSE' : '▶ PLAY'}
-        </button>
+      {/* ── controls ── */}
+      <div className="flex items-center gap-3 flex-wrap shrink-0">
 
-        <div className="flex items-center gap-2 flex-1 min-w-0">
+        {/* station search */}
+        <div className="relative">
           <input
-            type="range"
-            min={0}
-            max={Math.max(0, frames.length - 1)}
-            value={frameIndex}
-            onChange={handleScrub}
-            disabled={loading || !!error}
-            className="flex-1 accent-amber-400 disabled:opacity-40"
+            type="text"
+            value={search}
+            onChange={e => { setSearch(e.target.value); setShowDropdown(true); }}
+            onFocus={() => setShowDropdown(true)}
+            onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+            placeholder="Search station…"
+            className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-52 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
           />
-          <span className={`text-xs font-bold font-mono w-14 shrink-0 ${isNewest ? 'text-amber-400' : 'text-gray-400'}`}>
-            {loading ? '…' : currentTime}
-          </span>
+          {showDropdown && filtered.length > 0 && (
+            <div className="absolute top-full mt-1 left-0 w-64 bg-gray-900 border border-gray-700 rounded z-50 shadow-xl overflow-hidden">
+              {filtered.map(stn => (
+                <button
+                  key={stn.id}
+                  onMouseDown={() => { setSelected(stn); setSearch(''); setShowDropdown(false); }}
+                  className="w-full text-left px-3 py-2 text-xs font-mono text-gray-300 hover:bg-gray-800 border-b border-gray-800/60 last:border-0 flex items-center gap-2"
+                >
+                  <span className="text-amber-400 font-bold w-12 shrink-0">{stn.id}</span>
+                  <span className="text-gray-500 truncate">{stn.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
-        <button
-          onClick={fetchFrames}
-          disabled={loading}
-          className="px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-        >
-          ↺ REFRESH
-        </button>
+        {/* product buttons */}
+        {PRODUCTS.map(p => (
+          <button
+            key={p.id}
+            onClick={() => setProduct(p.id)}
+            className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+              product === p.id
+                ? 'border-amber-400 text-amber-400 bg-amber-400/10'
+                : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+
+        {/* selected station badge */}
+        {selected && (
+          <span className="text-xs font-mono text-amber-400 border border-amber-400/30 bg-amber-400/5 px-2 py-1 rounded shrink-0">
+            {selected.id}
+          </span>
+        )}
+
+        {/* play / scrubber */}
+        {frames.length > 0 && (
+          <>
+            <button
+              onClick={() => setPlaying(p => !p)}
+              className="px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border border-amber-400 text-amber-400 bg-amber-400/10 hover:bg-amber-400/20 transition-all shrink-0"
+            >
+              {playing ? '⏸ PAUSE' : '▶ PLAY'}
+            </button>
+            <div className="flex items-center gap-2 flex-1 min-w-32">
+              <input
+                type="range"
+                min={0}
+                max={frames.length - 1}
+                value={frameIdx}
+                onChange={e => { setPlaying(false); setFrameIdx(Number(e.target.value)); }}
+                className="flex-1 accent-amber-400"
+              />
+              <span className="text-xs font-mono text-gray-400 w-12 shrink-0 text-right">
+                {fmtUtc(frames[frameIdx])}
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Map */}
+      {/* ── map ── */}
       <div className="relative flex-1 rounded border border-gray-700 overflow-hidden">
-        {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-950 z-20">
-            <span className="text-xs text-gray-500 tracking-widest uppercase animate-pulse">Loading radar…</span>
+        {!selected && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+            <p className="text-xs text-gray-600 tracking-widest uppercase">
+              Click a station or search above
+            </p>
           </div>
         )}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-950 z-20">
-            <span className="text-xs text-red-500 tracking-widest uppercase">{error}</span>
+        {radarLoading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-gray-700 px-3 py-1.5 rounded">
+            <span className="text-xs text-gray-400 tracking-widest uppercase animate-pulse">
+              Loading {selected?.id}…
+            </span>
           </div>
         )}
-        <div ref={mapContainerRef} className="w-full h-full" />
+        <div ref={containerRef} className="w-full h-full" />
       </div>
 
-      {/* Footer */}
+      {/* ── footer ── */}
       <p className="text-xs text-gray-600 shrink-0">
-        Source: RainViewer · NEXRAD composite reflectivity · {frames.length > 0 ? `${frames.length} frames` : ''}
+        Source: NOAA/NWS RIDGE2 · WSR-88D
+        {selected ? ` · ${selected.id} — ${selected.name}` : ' · select a station'}
+        {frames.length > 0 ? ` · ${frames.length} frames` : ''}
       </p>
     </div>
   );
