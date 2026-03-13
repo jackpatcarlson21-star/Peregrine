@@ -98,7 +98,7 @@ const RadarTab = () => {
         const stns = (data.features ?? [])
           .filter(f => f.properties?.stationType === 'WSR-88D')
           .map(f => ({
-            id:   f.properties.stationIdentifier,
+            id:   f.properties.id,
             name: f.properties.name,
             lat:  f.geometry.coordinates[1],
             lng:  f.geometry.coordinates[0],
