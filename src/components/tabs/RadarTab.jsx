@@ -8,8 +8,8 @@ const RIDGE2_CAPS = (id) =>
   `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities`;
 
 const PRODUCTS = [
-  { id: 'bref_raw', label: 'REFLECTIVITY' },
-  { id: 'vel_raw',  label: 'VELOCITY' },
+  { id: 'sr_bref', label: 'REFLECTIVITY' },
+  { id: 'sr_bvel', label: 'VELOCITY' },
 ];
 
 const ANIM_MS = 650;
