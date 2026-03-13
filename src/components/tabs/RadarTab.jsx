@@ -100,6 +100,50 @@ const RadarTab = () => {
       .catch(console.error);
   }, []);
 
+  // ── draw station label tiles on map ─────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !stations.length) return;
+
+    // Remove old markers
+    map.eachLayer(l => { if (l._isStationMarker) map.removeLayer(l); });
+
+    const visible = search.trim()
+      ? stations.filter(s =>
+          s.id.toLowerCase().includes(search.toLowerCase()) ||
+          s.name.toLowerCase().includes(search.toLowerCase())
+        )
+      : stations;
+
+    visible.forEach(stn => {
+      const isSel = selected?.id === stn.id;
+      const icon = L.divIcon({
+        html: `<div style="
+          background:${isSel ? 'rgba(251,191,36,0.15)' : 'rgba(17,24,39,0.85)'};
+          border:1px solid ${isSel ? '#fbbf24' : '#4b5563'};
+          color:${isSel ? '#fbbf24' : '#d1d5db'};
+          font-size:10px;
+          font-family:monospace;
+          font-weight:bold;
+          padding:2px 5px;
+          border-radius:3px;
+          white-space:nowrap;
+          cursor:pointer;
+          user-select:none;
+          box-shadow:0 1px 3px rgba(0,0,0,0.5);
+          letter-spacing:0.05em;
+        ">${stn.id}</div>`,
+        className: '',
+        iconAnchor: [20, 10],
+      });
+
+      const marker = L.marker([stn.lat, stn.lng], { icon });
+      marker._isStationMarker = true;
+      marker.on('click', () => setSelected(stn));
+      marker.addTo(map);
+    });
+  }, [stations, selected, search]);
+
   // ── load radar (pre-build all frame layers) ─────────────────────────────────
   const loadRadar = useCallback(async (stn, prod) => {
     const map = mapRef.current;
@@ -171,13 +215,6 @@ const RadarTab = () => {
     return () => clearInterval(animRef.current);
   }, [playing, frames.length]);
 
-  // ── filtered station list ───────────────────────────────────────────────────
-  const filtered = search.trim()
-    ? stations.filter(s =>
-        s.id.toLowerCase().includes(search.toLowerCase()) ||
-        s.name.toLowerCase().includes(search.toLowerCase())
-      )
-    : stations;
 
   // ── render ──────────────────────────────────────────────────────────────────
   return (
@@ -185,6 +222,13 @@ const RadarTab = () => {
 
       {/* controls bar */}
       <div className="flex items-center gap-3 flex-wrap shrink-0">
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Filter stations…"
+          className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-44 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
+        />
         {PRODUCTS.map(p => (
           <button key={p.id} onClick={() => setProduct(p.id)}
             className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
@@ -220,45 +264,8 @@ const RadarTab = () => {
         )}
       </div>
 
-      {/* map + station list */}
-      <div className="flex gap-3" style={{ height: '70vh' }}>
-
-        {/* station list */}
-        <div className="flex flex-col w-52 shrink-0 bg-gray-900 border border-gray-700 rounded overflow-hidden">
-          <div className="p-2 border-b border-gray-700 shrink-0">
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Filter stations…"
-              className="w-full bg-gray-800 border border-gray-700 text-gray-200 text-xs font-mono px-2 py-1.5 rounded placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
-            />
-          </div>
-          <div className="overflow-y-auto flex-1">
-            {filtered.map(stn => {
-              const isSel = selected?.id === stn.id;
-              return (
-                <button
-                  key={stn.id}
-                  onClick={() => setSelected(stn)}
-                  className={`w-full text-left px-3 py-2 border-b border-gray-800/60 last:border-0 transition-colors ${
-                    isSel
-                      ? 'bg-amber-400/10 border-l-2 border-l-amber-400'
-                      : 'hover:bg-gray-800'
-                  }`}
-                >
-                  <div className={`text-xs font-bold font-mono ${isSel ? 'text-amber-400' : 'text-gray-300'}`}>
-                    {stn.id}
-                  </div>
-                  <div className="text-xs text-gray-500 truncate">{stn.name}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* map */}
-        <div className="relative flex-1 rounded border border-gray-700 overflow-hidden">
+      {/* map */}
+      <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: '70vh' }}>
           {!selected && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <p className="text-xs text-gray-600 tracking-widest uppercase">Select a station from the list</p>
@@ -272,7 +279,6 @@ const RadarTab = () => {
             </div>
           )}
           <div ref={containerRef} className="w-full h-full" />
-        </div>
       </div>
 
       <p className="text-xs text-gray-600 shrink-0">
