@@ -80,6 +80,8 @@ const RadarTab = () => {
       zoomControl: true,
       attributionControl: false,
     });
+    // Force Leaflet to recalculate container size after paint
+    setTimeout(() => map.invalidateSize(), 100);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       subdomains: 'abcd', maxZoom: 19,
     }).addTo(map);
@@ -204,7 +206,7 @@ const RadarTab = () => {
 
   // ── render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col gap-3" style={{ height: 'calc(100vh - 130px)' }}>
+    <div className="flex flex-col gap-3">
 
       {/* ── controls ── */}
       <div className="flex items-center gap-3 flex-wrap shrink-0">
@@ -285,7 +287,7 @@ const RadarTab = () => {
       </div>
 
       {/* ── map ── */}
-      <div className="relative flex-1 rounded border border-gray-700 overflow-hidden">
+      <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: '70vh' }}>
         {!selected && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
             <p className="text-xs text-gray-600 tracking-widest uppercase">
