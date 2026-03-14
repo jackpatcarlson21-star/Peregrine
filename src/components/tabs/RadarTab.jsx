@@ -1,20 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-const NWS_API = 'https://api.weather.gov/radar/stations';
-const IEM_WMS = 'https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi';
+const NWS_API  = 'https://api.weather.gov/radar/stations';
+const RIDGE2   = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms`;
 
-// IEM time-shifted composite layers, oldest → newest
-const FRAME_OFFSETS = [55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5, 0];
-const frameLayerId  = (min) => min === 0 ? 'nexrad-n0q-900913' : `nexrad-n0q-900913-m${String(min).padStart(2,'0')}m`;
-const frameLabel    = (min) => {
-  const t = new Date(Date.now() - min * 60000);
-  return `${String(t.getUTCHours()).padStart(2,'0')}${String(t.getUTCMinutes()).padStart(2,'0')}Z`;
-};
+const PRODUCTS = [
+  { id: 'sr_bref', label: 'REFLECTIVITY' },
+  { id: 'sr_bvel', label: 'VELOCITY' },
+  { id: 'bdhc',    label: 'CORRELATION COEF' },  // dual-pol hydrometeor classification
+];
 
 const RADAR_OPQ = 0.85;
 const ANIM_MS   = 700;
+
+const fmtUtc = (iso) => {
+  if (!iso) return '----Z';
+  const d = new Date(iso);
+  return `${String(d.getUTCHours()).padStart(2,'0')}${String(d.getUTCMinutes()).padStart(2,'0')}Z`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const RadarTab = () => {
   const containerRef   = useRef(null);
@@ -22,49 +28,31 @@ const RadarTab = () => {
   const frameLayersRef = useRef([]);
   const animRef        = useRef(null);
 
-  const [stations, setStations] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [frameIdx, setFrameIdx] = useState(FRAME_OFFSETS.length - 1); // start at "now"
-  const [playing,  setPlaying]  = useState(true);
-  const [search,   setSearch]   = useState('');
+  const [stations,     setStations]     = useState([]);
+  const [selected,     setSelected]     = useState(null);
+  const [product,      setProduct]      = useState('sr_bref');
+  const [frames,       setFrames]       = useState([]);
+  const [frameIdx,     setFrameIdx]     = useState(0);
+  const [playing,      setPlaying]      = useState(false);
+  const [radarLoading, setRadarLoading] = useState(false);
+  const [search,       setSearch]       = useState('');
 
-  // ── init map + pre-load all radar layers ─────────────────────────────────────
+  // ── init map ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current) return;
-
     const map = L.map(containerRef.current, {
       center: [38.5, -96], zoom: 4,
       zoomControl: true, attributionControl: false,
     });
-
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       subdomains: 'abcd', maxZoom: 19,
     }).addTo(map);
-
-    // Pre-create all IEM radar layers at once (tiles start loading in background)
-    const layers = FRAME_OFFSETS.map((min, i) =>
-      L.tileLayer.wms(IEM_WMS, {
-        layers:      frameLayerId(min),
-        format:      'image/png',
-        transparent: true,
-        version:     '1.1.1',
-        opacity:     i === FRAME_OFFSETS.length - 1 ? RADAR_OPQ : 0,
-        zIndex:      10,
-      }).addTo(map)
-    );
-
-    frameLayersRef.current = layers;
-    mapRef.current = map;
     setTimeout(() => map.invalidateSize(), 100);
-
-    return () => {
-      map.remove();
-      mapRef.current = null;
-      frameLayersRef.current = [];
-    };
+    mapRef.current = map;
+    return () => { map.remove(); mapRef.current = null; };
   }, []);
 
-  // ── load stations ─────────────────────────────────────────────────────────────
+  // ── load stations ─────────────────────────────────────────────────────────
   useEffect(() => {
     fetch(NWS_API, { headers: { Accept: 'application/geo+json' } })
       .then(r => r.json())
@@ -83,11 +71,10 @@ const RadarTab = () => {
       .catch(console.error);
   }, []);
 
-  // ── draw station label tiles on map ──────────────────────────────────────────
+  // ── draw station label tiles on map ───────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !stations.length) return;
-
     map.eachLayer(l => { if (l._isStationMarker) map.removeLayer(l); });
 
     const visible = search.trim()
@@ -104,19 +91,12 @@ const RadarTab = () => {
           background:${isSel ? 'rgba(251,191,36,0.2)' : 'rgba(17,24,39,0.85)'};
           border:1px solid ${isSel ? '#fbbf24' : '#4b5563'};
           color:${isSel ? '#fbbf24' : '#d1d5db'};
-          font-size:10px;
-          font-family:monospace;
-          font-weight:bold;
-          padding:2px 5px;
-          border-radius:3px;
-          white-space:nowrap;
-          cursor:pointer;
-          user-select:none;
-          box-shadow:0 1px 4px rgba(0,0,0,0.6);
-          letter-spacing:0.05em;
+          font-size:10px; font-family:monospace; font-weight:bold;
+          padding:2px 5px; border-radius:3px; white-space:nowrap;
+          cursor:pointer; user-select:none;
+          box-shadow:0 1px 4px rgba(0,0,0,0.6); letter-spacing:0.05em;
         ">${stn.id}</div>`,
-        className: '',
-        iconAnchor: [20, 10],
+        className: '', iconAnchor: [20, 10],
       });
       const marker = L.marker([stn.lat, stn.lng], { icon });
       marker._isStationMarker = true;
@@ -125,34 +105,80 @@ const RadarTab = () => {
     });
   }, [stations, selected, search]);
 
-  // ── zoom to station on select ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (selected && mapRef.current) {
-      mapRef.current.setView([selected.lat, selected.lng], 7, { animate: true });
-    }
-  }, [selected]);
+  // ── load radar for selected station ───────────────────────────────────────
+  const loadRadar = useCallback(async (stn, prod) => {
+    const map = mapRef.current;
+    if (!map) return;
 
-  // ── show only current frame ───────────────────────────────────────────────────
+    setRadarLoading(true);
+    setPlaying(false);
+    setFrames([]);
+
+    // Remove old frame layers
+    frameLayersRef.current.forEach(l => map.removeLayer(l));
+    frameLayersRef.current = [];
+
+    map.setView([stn.lat, stn.lng], 7, { animate: true });
+
+    try {
+      // Fetch actual scan timestamps via our server-side proxy (no CORS issue)
+      const res   = await fetch(`/api/radar/times?station=${stn.id}`);
+      const data  = await res.json();
+      const times = data.times ?? [];
+      if (!times.length) throw new Error('no frames returned');
+
+      const layerName = `${stn.id.toLowerCase()}_${prod}`;
+      const wmsUrl    = RIDGE2(stn.id);
+
+      // Pre-create one layer per frame — all added at opacity 0 so tiles start caching
+      const layers = times.map((time, i) =>
+        L.tileLayer.wms(wmsUrl, {
+          layers:      layerName,
+          format:      'image/png',
+          transparent: true,
+          version:     '1.3.0',
+          crs:         L.CRS.EPSG3857,
+          TIME:        time,
+          opacity:     i === times.length - 1 ? RADAR_OPQ : 0,
+          zIndex:      10,
+        }).addTo(map)
+      );
+
+      frameLayersRef.current = layers;
+      setFrames(times);
+      setFrameIdx(times.length - 1);
+      setPlaying(true);
+    } catch (e) {
+      console.error('radar load failed', e);
+    } finally {
+      setRadarLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selected) loadRadar(selected, product);
+  }, [selected, product, loadRadar]);
+
+  // ── show only current frame ────────────────────────────────────────────────
   useEffect(() => {
     frameLayersRef.current.forEach((l, i) =>
       l.setOpacity(i === frameIdx ? RADAR_OPQ : 0)
     );
   }, [frameIdx]);
 
-  // ── animation loop ────────────────────────────────────────────────────────────
+  // ── animation loop ─────────────────────────────────────────────────────────
   useEffect(() => {
     clearInterval(animRef.current);
-    if (playing) {
+    if (playing && frames.length > 1) {
       animRef.current = setInterval(
-        () => setFrameIdx(i => (i + 1) % FRAME_OFFSETS.length),
+        () => setFrameIdx(i => (i + 1) % frames.length),
         ANIM_MS
       );
     }
     return () => clearInterval(animRef.current);
-  }, [playing]);
+  }, [playing, frames.length]);
 
-  const currentLabel = frameLabel(FRAME_OFFSETS[frameIdx]);
-
+  // ── render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-3">
 
@@ -166,30 +192,37 @@ const RadarTab = () => {
           className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-44 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
         />
 
-        <button
-          onClick={() => setPlaying(p => !p)}
-          className="px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border border-amber-400 text-amber-400 bg-amber-400/10 hover:bg-amber-400/20 transition-all"
-        >
-          {playing ? '⏸ PAUSE' : '▶ PLAY'}
-        </button>
+        {PRODUCTS.map(p => (
+          <button key={p.id} onClick={() => setProduct(p.id)}
+            className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+              product === p.id
+                ? 'border-amber-400 text-amber-400 bg-amber-400/10'
+                : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+            }`}>
+            {p.label}
+          </button>
+        ))}
 
-        <div className="flex items-center gap-2 flex-1 min-w-32">
-          <input
-            type="range"
-            min={0}
-            max={FRAME_OFFSETS.length - 1}
-            value={frameIdx}
-            onChange={e => { setPlaying(false); setFrameIdx(Number(e.target.value)); }}
-            className="flex-1 accent-amber-400"
-          />
-          <span className={`text-xs font-mono w-14 shrink-0 text-right ${frameIdx === FRAME_OFFSETS.length - 1 ? 'text-amber-400 font-bold' : 'text-gray-400'}`}>
-            {currentLabel}
-          </span>
-        </div>
+        {selected && frames.length > 0 && (
+          <>
+            <button onClick={() => setPlaying(p => !p)}
+              className="px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border border-amber-400 text-amber-400 bg-amber-400/10 hover:bg-amber-400/20 transition-all shrink-0">
+              {playing ? '⏸ PAUSE' : '▶ PLAY'}
+            </button>
+            <div className="flex items-center gap-2 flex-1 min-w-32">
+              <input type="range" min={0} max={frames.length - 1} value={frameIdx}
+                onChange={e => { setPlaying(false); setFrameIdx(Number(e.target.value)); }}
+                className="flex-1 accent-amber-400" />
+              <span className={`text-xs font-mono w-14 shrink-0 text-right ${frameIdx === frames.length - 1 ? 'text-amber-400 font-bold' : 'text-gray-400'}`}>
+                {fmtUtc(frames[frameIdx])}
+              </span>
+            </div>
+          </>
+        )}
 
         {selected && (
           <span className="text-xs font-mono text-amber-400 border border-amber-400/30 bg-amber-400/5 px-2 py-1 rounded shrink-0 ml-auto">
-            {selected.id} — {selected.name}
+            {selected.id}
           </span>
         )}
       </div>
@@ -198,15 +231,22 @@ const RadarTab = () => {
       <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: '70vh' }}>
         {!selected && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-            <p className="text-xs text-gray-600 tracking-widest uppercase">Click a station label to zoom in</p>
+            <p className="text-xs text-gray-600 tracking-widest uppercase">Click a station label to load radar</p>
+          </div>
+        )}
+        {radarLoading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-gray-700 px-3 py-1.5 rounded">
+            <span className="text-xs text-gray-400 tracking-widest uppercase animate-pulse">
+              Loading {selected?.id}…
+            </span>
           </div>
         )}
         <div ref={containerRef} className="w-full h-full" />
       </div>
 
       <p className="text-xs text-gray-600 shrink-0">
-        Source: Iowa Environmental Mesonet · NEXRAD composite reflectivity · last 55 min
-        {selected ? ` · ${selected.id} — ${selected.name}` : ''}
+        Source: NOAA/NWS RIDGE2 · WSR-88D{selected ? ` · ${selected.id} — ${selected.name}` : ''}
+        {frames.length > 0 ? ` · ${frames.length} frames` : ''}
       </p>
     </div>
   );
