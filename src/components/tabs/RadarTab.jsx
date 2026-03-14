@@ -2,13 +2,13 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-const NWS_API  = 'https://api.weather.gov/radar/stations';
-const RIDGE2   = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms`;
+const NWS_API = 'https://api.weather.gov/radar/stations';
+const RIDGE2  = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms`;
 
 const PRODUCTS = [
   { id: 'sr_bref', label: 'REFLECTIVITY' },
   { id: 'sr_bvel', label: 'VELOCITY' },
-  { id: 'bdhc',    label: 'CORRELATION COEF' },  // dual-pol hydrometeor classification
+  { id: 'bdhc',   label: 'CORRELATION COEF' },
 ];
 
 const RADAR_OPQ = 0.85;
@@ -20,13 +20,13 @@ const fmtUtc = (iso) => {
   return `${String(d.getUTCHours()).padStart(2,'0')}${String(d.getUTCMinutes()).padStart(2,'0')}Z`;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 const RadarTab = () => {
-  const containerRef   = useRef(null);
-  const mapRef         = useRef(null);
-  const frameLayersRef = useRef([]);
-  const animRef        = useRef(null);
+  const containerRef    = useRef(null);
+  const mapRef          = useRef(null);
+  const markersGroupRef = useRef(null);   // L.layerGroup — safe clearLayers()
+  const frameLayersRef  = useRef([]);
+  const loadIdRef       = useRef(0);      // cancels stale loads
+  const animRef         = useRef(null);
 
   const [stations,     setStations]     = useState([]);
   const [selected,     setSelected]     = useState(null);
@@ -35,9 +35,10 @@ const RadarTab = () => {
   const [frameIdx,     setFrameIdx]     = useState(0);
   const [playing,      setPlaying]      = useState(false);
   const [radarLoading, setRadarLoading] = useState(false);
+  const [radarError,   setRadarError]   = useState(null);
   const [search,       setSearch]       = useState('');
 
-  // ── init map ──────────────────────────────────────────────────────────────
+  // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current) return;
     const map = L.map(containerRef.current, {
@@ -47,12 +48,13 @@ const RadarTab = () => {
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       subdomains: 'abcd', maxZoom: 19,
     }).addTo(map);
+    markersGroupRef.current = L.layerGroup().addTo(map);
     setTimeout(() => map.invalidateSize(), 100);
     mapRef.current = map;
     return () => { map.remove(); mapRef.current = null; };
   }, []);
 
-  // ── load stations ─────────────────────────────────────────────────────────
+  // ── load stations ──────────────────────────────────────────────────────────
   useEffect(() => {
     fetch(NWS_API, { headers: { Accept: 'application/geo+json' } })
       .then(r => r.json())
@@ -71,11 +73,12 @@ const RadarTab = () => {
       .catch(console.error);
   }, []);
 
-  // ── draw station label tiles on map ───────────────────────────────────────
+  // ── draw station label tiles ────────────────────────────────────────────────
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !stations.length) return;
-    map.eachLayer(l => { if (l._isStationMarker) map.removeLayer(l); });
+    if (!markersGroupRef.current || !stations.length) return;
+
+    // Use clearLayers() — safe, no eachLayer mutation bug
+    markersGroupRef.current.clearLayers();
 
     const visible = search.trim()
       ? stations.filter(s =>
@@ -99,40 +102,43 @@ const RadarTab = () => {
         className: '', iconAnchor: [20, 10],
       });
       const marker = L.marker([stn.lat, stn.lng], { icon });
-      marker._isStationMarker = true;
       marker.on('click', () => setSelected(stn));
-      marker.addTo(map);
+      markersGroupRef.current.addLayer(marker);
     });
   }, [stations, selected, search]);
 
-  // ── load radar for selected station ───────────────────────────────────────
+  // ── load radar ─────────────────────────────────────────────────────────────
   const loadRadar = useCallback(async (stn, prod) => {
     const map = mapRef.current;
     if (!map) return;
 
+    // Increment load ID — any previous load that completes after this point is stale
+    const myId = ++loadIdRef.current;
+
     setRadarLoading(true);
+    setRadarError(null);
     setPlaying(false);
     setFrames([]);
 
-    // Remove old frame layers
+    // Remove old frame layers from map
     frameLayersRef.current.forEach(l => map.removeLayer(l));
     frameLayersRef.current = [];
 
     map.setView([stn.lat, stn.lng], 7, { animate: true });
 
     try {
-      // Fetch actual scan timestamps via our server-side proxy (no CORS issue)
       const res   = await fetch(`/api/radar/times?station=${stn.id}`);
       const data  = await res.json();
       const times = data.times ?? [];
-      if (!times.length) throw new Error('no frames returned');
+
+      // Stale load — another station was selected before this one finished
+      if (loadIdRef.current !== myId) return;
+
+      if (!times.length) throw new Error(`No scan data available for ${stn.id}`);
 
       const layerName = `${stn.id.toLowerCase()}_${prod}`;
-      const wmsUrl    = RIDGE2(stn.id);
-
-      // Pre-create one layer per frame — all added at opacity 0 so tiles start caching
       const layers = times.map((time, i) =>
-        L.tileLayer.wms(wmsUrl, {
+        L.tileLayer.wms(RIDGE2(stn.id), {
           layers:      layerName,
           format:      'image/png',
           transparent: true,
@@ -149,9 +155,12 @@ const RadarTab = () => {
       setFrameIdx(times.length - 1);
       setPlaying(true);
     } catch (e) {
-      console.error('radar load failed', e);
+      if (loadIdRef.current === myId) {
+        setRadarError(e.message);
+        console.error('radar load failed', e);
+      }
     } finally {
-      setRadarLoading(false);
+      if (loadIdRef.current === myId) setRadarLoading(false);
     }
   }, []);
 
@@ -181,17 +190,13 @@ const RadarTab = () => {
   // ── render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-3">
-
-      {/* controls */}
       <div className="flex items-center gap-3 flex-wrap shrink-0">
         <input
-          type="text"
-          value={search}
+          type="text" value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Filter stations…"
           className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-44 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
         />
-
         {PRODUCTS.map(p => (
           <button key={p.id} onClick={() => setProduct(p.id)}
             className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
@@ -202,7 +207,6 @@ const RadarTab = () => {
             {p.label}
           </button>
         ))}
-
         {selected && frames.length > 0 && (
           <>
             <button onClick={() => setPlaying(p => !p)}
@@ -219,7 +223,6 @@ const RadarTab = () => {
             </div>
           </>
         )}
-
         {selected && (
           <span className="text-xs font-mono text-amber-400 border border-amber-400/30 bg-amber-400/5 px-2 py-1 rounded shrink-0 ml-auto">
             {selected.id}
@@ -227,7 +230,6 @@ const RadarTab = () => {
         )}
       </div>
 
-      {/* map */}
       <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: '70vh' }}>
         {!selected && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
@@ -236,9 +238,12 @@ const RadarTab = () => {
         )}
         {radarLoading && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-gray-700 px-3 py-1.5 rounded">
-            <span className="text-xs text-gray-400 tracking-widest uppercase animate-pulse">
-              Loading {selected?.id}…
-            </span>
+            <span className="text-xs text-gray-400 tracking-widest uppercase animate-pulse">Loading {selected?.id}…</span>
+          </div>
+        )}
+        {radarError && !radarLoading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-red-800 px-3 py-1.5 rounded">
+            <span className="text-xs text-red-400 tracking-wider">{radarError}</span>
           </div>
         )}
         <div ref={containerRef} className="w-full h-full" />
