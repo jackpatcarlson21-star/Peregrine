@@ -8,11 +8,13 @@ const RIDGE2  = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCas
 const PRODUCTS = [
   { id: 'sr_bref', label: 'REFLECTIVITY' },
   { id: 'sr_bvel', label: 'VELOCITY' },
-  { id: 'bdhc',   label: 'CORRELATION COEF' },
+  { id: 'bdhc',   label: 'HYDROMETEOR CLASS' },
+  { id: 'boha',   label: '1HR PRECIP' },
+  { id: 'bdsa',   label: 'STORM TOTAL' },
 ];
 
 const RADAR_OPQ = 0.85;
-const ANIM_MS   = 700;
+const ANIM_MS   = 400;
 
 const fmtUtc = (iso) => {
   if (!iso) return '----Z';
@@ -27,6 +29,7 @@ const RadarTab = () => {
   const frameLayersRef  = useRef([]);
   const loadIdRef       = useRef(0);      // cancels stale loads
   const animRef         = useRef(null);
+  const loadedRef       = useRef(new Set()); // tracks fully-loaded frame indices
 
   const [stations,     setStations]     = useState([]);
   const [selected,     setSelected]     = useState(null);
@@ -37,6 +40,8 @@ const RadarTab = () => {
   const [radarLoading, setRadarLoading] = useState(false);
   const [radarError,   setRadarError]   = useState(null);
   const [search,       setSearch]       = useState('');
+  const [tilt,           setTilt]           = useState('0.5');
+  const [availableTilts, setAvailableTilts] = useState(['0.5']);
 
   // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -45,8 +50,8 @@ const RadarTab = () => {
       center: [38.5, -96], zoom: 4,
       zoomControl: true, attributionControl: false,
     });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd', maxZoom: 19,
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
     }).addTo(map);
     markersGroupRef.current = L.layerGroup().addTo(map);
     setTimeout(() => map.invalidateSize(), 100);
@@ -108,7 +113,7 @@ const RadarTab = () => {
   }, [stations, selected, search]);
 
   // ── load radar ─────────────────────────────────────────────────────────────
-  const loadRadar = useCallback(async (stn, prod) => {
+  const loadRadar = useCallback(async (stn, prod, elev) => {
     const map = mapRef.current;
     if (!map) return;
 
@@ -123,6 +128,7 @@ const RadarTab = () => {
     // Remove old frame layers from map
     frameLayersRef.current.forEach(l => map.removeLayer(l));
     frameLayersRef.current = [];
+    loadedRef.current = new Set();
 
     map.setView([stn.lat, stn.lng], 7, { animate: true });
 
@@ -130,25 +136,49 @@ const RadarTab = () => {
       const res   = await fetch(`/api/radar/times?station=${stn.id}`);
       const data  = await res.json();
       const times = data.times ?? [];
+      const elevations = data.elevations ?? ['0.5'];
 
       // Stale load — another station was selected before this one finished
       if (loadIdRef.current !== myId) return;
 
+      setAvailableTilts(elevations);
+      if (!elevations.includes(elev)) {
+        elev = elevations[0];
+        setTilt(elev);
+      }
+
       if (!times.length) throw new Error(`No scan data available for ${stn.id}`);
 
       const layerName = `${stn.id.toLowerCase()}_${prod}`;
-      const layers = times.map((time, i) =>
-        L.tileLayer.wms(RIDGE2(stn.id), {
+      const layers = times.map((time, i) => {
+        const layer = L.tileLayer.wms(RIDGE2(stn.id), {
           layers:      layerName,
           format:      'image/png',
           transparent: true,
           version:     '1.3.0',
           crs:         L.CRS.EPSG3857,
           TIME:        time,
-          opacity:     i === times.length - 1 ? RADAR_OPQ : 0,
+          ELEVATION:   elev,
+          opacity:     0,
           zIndex:      10,
-        }).addTo(map)
-      );
+        }).addTo(map);
+
+        layer.once('load', () => {
+          loadedRef.current.add(i);
+          // Apply CSS transition once the container element exists
+          if (layer._container) {
+            layer._container.style.transition = 'opacity 0.2s ease-in-out';
+          }
+        });
+
+        return layer;
+      });
+
+      // Show most-recent frame as soon as it loads; others stay hidden until animation
+      const lastIdx = times.length - 1;
+      layers[lastIdx].once('load', () => {
+        layers[lastIdx].setOpacity(RADAR_OPQ);
+      });
 
       frameLayersRef.current = layers;
       setFrames(times);
@@ -165,24 +195,31 @@ const RadarTab = () => {
   }, []);
 
   useEffect(() => {
-    if (selected) loadRadar(selected, product);
-  }, [selected, product, loadRadar]);
+    if (selected) loadRadar(selected, product, tilt);
+  }, [selected, product, tilt, loadRadar]);
 
   // ── show only current frame ────────────────────────────────────────────────
   useEffect(() => {
-    frameLayersRef.current.forEach((l, i) =>
-      l.setOpacity(i === frameIdx ? RADAR_OPQ : 0)
-    );
+    frameLayersRef.current.forEach((l, i) => {
+      if (l._container) l._container.style.transition = 'opacity 0.2s ease-in-out';
+      l.setOpacity(i === frameIdx ? RADAR_OPQ : 0);
+    });
   }, [frameIdx]);
 
   // ── animation loop ─────────────────────────────────────────────────────────
   useEffect(() => {
     clearInterval(animRef.current);
     if (playing && frames.length > 1) {
-      animRef.current = setInterval(
-        () => setFrameIdx(i => (i + 1) % frames.length),
-        ANIM_MS
-      );
+      animRef.current = setInterval(() => {
+        setFrameIdx(cur => {
+          // Walk forward until we find a loaded frame (max full loop)
+          for (let step = 1; step <= frames.length; step++) {
+            const next = (cur + step) % frames.length;
+            if (loadedRef.current.has(next)) return next;
+          }
+          return cur; // no loaded frame found yet — hold
+        });
+      }, ANIM_MS);
     }
     return () => clearInterval(animRef.current);
   }, [playing, frames.length]);
@@ -207,6 +244,21 @@ const RadarTab = () => {
             {p.label}
           </button>
         ))}
+        {availableTilts.length > 1 && (
+          <>
+            <span className="text-xs font-bold tracking-wider uppercase text-gray-500">TILT</span>
+            {availableTilts.map(t => (
+              <button key={t} onClick={() => setTilt(t)}
+                className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+                  tilt === t
+                    ? 'border-amber-400 text-amber-400 bg-amber-400/10'
+                    : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                }`}>
+                {t}°
+              </button>
+            ))}
+          </>
+        )}
         {selected && frames.length > 0 && (
           <>
             <button onClick={() => setPlaying(p => !p)}
@@ -250,7 +302,7 @@ const RadarTab = () => {
       </div>
 
       <p className="text-xs text-gray-600 shrink-0">
-        Source: NOAA/NWS RIDGE2 · WSR-88D{selected ? ` · ${selected.id} — ${selected.name}` : ''}
+        Source: NOAA/NWS RIDGE2 · WSR-88D · Esri World Imagery{selected ? ` · ${selected.id} — ${selected.name}` : ''}
         {frames.length > 0 ? ` · ${frames.length} frames` : ''}
       </p>
     </div>

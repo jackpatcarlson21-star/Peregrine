@@ -20,7 +20,7 @@ app.get('/api/radar/times', async (req, res) => {
     const xml = await r.text();
 
     const dimMatch = xml.match(/Dimension[^>]+name="time"[^>]*>([\s\S]*?)<\/Dimension>/i);
-    if (!dimMatch) return res.json({ times: [] });
+    if (!dimMatch) return res.json({ times: [], elevations: ['0.5'] });
 
     const raw = dimMatch[1].trim();
     let times = [];
@@ -40,7 +40,19 @@ app.get('/api/radar/times', async (req, res) => {
       }
     }
 
-    res.json({ times });
+    // Parse elevation dimension (future-ready for multi-tilt support)
+    let elevations = ['0.5'];
+    const elevMatch = xml.match(/Dimension[^>]+name="elevation"[^>]*>([\s\S]*?)<\/Dimension>/i);
+    if (elevMatch) {
+      const elevRaw = elevMatch[1].trim();
+      if (elevRaw.includes(',')) {
+        elevations = elevRaw.split(',').map(e => e.trim()).filter(Boolean);
+      } else if (elevRaw) {
+        elevations = [elevRaw.trim()];
+      }
+    }
+
+    res.json({ times, elevations });
   } catch (e) {
     res.status(500).json({ error: e.message, times: [] });
   }
