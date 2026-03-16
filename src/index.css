@@ -33,4 +33,18 @@
   .nav-btn-active {
     @apply text-amber-400 bg-gray-800 border-amber-400/40;
   }
+  .leaflet-popup-content-wrapper {
+    @apply bg-gray-900 border border-gray-700 rounded-lg shadow-xl;
+    color: #d1d5db;
+  }
+  .leaflet-popup-tip {
+    background: #111827;
+    border: 1px solid #374151;
+  }
+  .leaflet-popup-close-button {
+    color: #9ca3af !important;
+  }
+  .leaflet-popup-close-button:hover {
+    color: #fbbf24 !important;
+  }
 }

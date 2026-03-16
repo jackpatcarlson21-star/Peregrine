@@ -13,6 +13,18 @@ const PRODUCTS = [
   { id: 'bdsa',   label: 'STORM TOTAL' },
 ];
 
+const NWS_ALERTS_API = 'https://api.weather.gov/alerts/active';
+const WARNINGS_REFRESH_MS = 60_000;
+
+const WARNING_STYLES = {
+  'Tornado Warning': {
+    color: '#FF1111', fillColor: '#FF1111', fillOpacity: 0.18, weight: 2.5,
+  },
+  'Severe Thunderstorm Warning': {
+    color: '#FFD700', fillColor: '#FFD700', fillOpacity: 0.12, weight: 2, dashArray: '6 4',
+  },
+};
+
 const RADAR_OPQ = 0.85;
 const ANIM_MS   = 400;
 
@@ -42,6 +54,9 @@ const RadarTab = () => {
   const [search,       setSearch]       = useState('');
   const [tilt,           setTilt]           = useState('0.5');
   const [availableTilts, setAvailableTilts] = useState(['0.5']);
+  const [showWarnings,   setShowWarnings]   = useState(true);
+  const warningsLayerRef    = useRef(null);
+  const warningsIntervalRef = useRef(null);
 
   // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -224,6 +239,65 @@ const RadarTab = () => {
     return () => clearInterval(animRef.current);
   }, [playing, frames.length]);
 
+  // ── warning polygons ───────────────────────────────────────────────────────
+  const fetchWarnings = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) return;
+    try {
+      const url = `${NWS_ALERTS_API}?status=actual&event=Severe%20Thunderstorm%20Warning,Tornado%20Warning`;
+      const res = await fetch(url, { headers: { Accept: 'application/geo+json' } });
+      if (!res.ok) throw new Error(`NWS alerts ${res.status}`);
+      const geojson = await res.json();
+
+      if (warningsLayerRef.current) {
+        map.removeLayer(warningsLayerRef.current);
+        warningsLayerRef.current = null;
+      }
+      if (!geojson.features?.length) return;
+
+      const layer = L.geoJSON(geojson, {
+        style: (feature) => {
+          const evt = feature.properties?.event;
+          return WARNING_STYLES[evt] || WARNING_STYLES['Severe Thunderstorm Warning'];
+        },
+        onEachFeature: (feature, layer) => {
+          const p = feature.properties;
+          if (!p) return;
+          const isTor = p.event === 'Tornado Warning';
+          const expires = p.expires ? new Date(p.expires).toUTCString() : 'Unknown';
+          layer.bindPopup(
+            `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;max-width:320px;line-height:1.5">
+              <div style="font-weight:bold;font-size:13px;color:${isTor ? '#FF1111' : '#FFD700'};margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
+                ${p.event || 'WARNING'}
+              </div>
+              <div style="color:#d1d5db;margin-bottom:6px">${p.headline || ''}</div>
+              <div style="color:#9ca3af;font-size:10px"><strong>Area:</strong> ${p.areaDesc || 'N/A'}</div>
+              <div style="color:#9ca3af;font-size:10px"><strong>Expires:</strong> ${expires}</div>
+            </div>`,
+            { maxWidth: 350 }
+          );
+        },
+      }).addTo(map);
+
+      warningsLayerRef.current = layer;
+    } catch (err) {
+      console.error('Warning polygon fetch failed:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    clearInterval(warningsIntervalRef.current);
+    warningsIntervalRef.current = null;
+    if (showWarnings && mapRef.current) {
+      fetchWarnings();
+      warningsIntervalRef.current = setInterval(fetchWarnings, WARNINGS_REFRESH_MS);
+    } else if (!showWarnings && warningsLayerRef.current && mapRef.current) {
+      mapRef.current.removeLayer(warningsLayerRef.current);
+      warningsLayerRef.current = null;
+    }
+    return () => clearInterval(warningsIntervalRef.current);
+  }, [showWarnings, fetchWarnings]);
+
   // ── render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-3">
@@ -244,6 +318,14 @@ const RadarTab = () => {
             {p.label}
           </button>
         ))}
+        <button onClick={() => setShowWarnings(w => !w)}
+          className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+            showWarnings
+              ? 'border-red-500 text-red-400 bg-red-500/10'
+              : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+          }`}>
+          {showWarnings ? 'WARNINGS ON' : 'WARNINGS OFF'}
+        </button>
         {availableTilts.length > 1 && (
           <>
             <span className="text-xs font-bold tracking-wider uppercase text-gray-500">TILT</span>
@@ -304,6 +386,7 @@ const RadarTab = () => {
       <p className="text-xs text-gray-600 shrink-0">
         Source: NOAA/NWS RIDGE2 · WSR-88D · Esri World Imagery{selected ? ` · ${selected.id} — ${selected.name}` : ''}
         {frames.length > 0 ? ` · ${frames.length} frames` : ''}
+        {showWarnings ? ' · NWS Active Alerts' : ''}
       </p>
     </div>
   );
