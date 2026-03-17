@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import * as topojson from 'topojson-client';
+import statesAtlas from 'us-atlas/states-10m.json';
 
 const NWS_API = 'https://api.weather.gov/radar/stations';
 const RIDGE2  = (id) => `https://opengeo.ncep.noaa.gov/geoserver/${id.toLowerCase()}/wms`;
@@ -37,11 +39,19 @@ const fmtUtc = (iso) => {
 const RadarTab = () => {
   const containerRef    = useRef(null);
   const mapRef          = useRef(null);
-  const markersGroupRef = useRef(null);   // L.layerGroup — safe clearLayers()
+  const markersGroupRef = useRef(null);
   const frameLayersRef  = useRef([]);
-  const loadIdRef       = useRef(0);      // cancels stale loads
+  const loadIdRef       = useRef(0);
   const animRef         = useRef(null);
-  const loadedRef       = useRef(new Set()); // tracks fully-loaded frame indices
+  const loadedRef        = useRef(new Set());
+  const frameIdxRef      = useRef(0);
+  const shownFrameRef    = useRef(-1);
+  const boundaryLayerRef = useRef(null);
+  const selectedRef      = useRef(null);
+  const productRef       = useRef('sr_bref');
+  const tiltRef          = useRef('0.5');
+  const warningsLayerRef    = useRef(null);
+  const warningsIntervalRef = useRef(null);
 
   const [stations,     setStations]     = useState([]);
   const [selected,     setSelected]     = useState(null);
@@ -52,11 +62,10 @@ const RadarTab = () => {
   const [radarLoading, setRadarLoading] = useState(false);
   const [radarError,   setRadarError]   = useState(null);
   const [search,       setSearch]       = useState('');
+  const [showBounds,   setShowBounds]   = useState(true);
   const [tilt,           setTilt]           = useState('0.5');
   const [availableTilts, setAvailableTilts] = useState(['0.5']);
   const [showWarnings,   setShowWarnings]   = useState(true);
-  const warningsLayerRef    = useRef(null);
-  const warningsIntervalRef = useRef(null);
 
   // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -68,11 +77,29 @@ const RadarTab = () => {
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
       maxZoom: 19,
     }).addTo(map);
+
+    const statesGeo = topojson.feature(statesAtlas, statesAtlas.objects.states);
+    const meshGeo   = topojson.mesh(statesAtlas, statesAtlas.objects.states, (a, b) => a !== b);
+
+    const boundaryGroup = L.layerGroup().addTo(map);
+    L.geoJSON(meshGeo,   { style: { color: '#ffffff', weight: 0.8, opacity: 0.25, fill: false } }).addTo(boundaryGroup);
+    L.geoJSON(statesGeo, { style: { color: '#ffffff', weight: 1.2, opacity: 0.4,  fill: false } }).addTo(boundaryGroup);
+    boundaryLayerRef.current = boundaryGroup;
+
     markersGroupRef.current = L.layerGroup().addTo(map);
     setTimeout(() => map.invalidateSize(), 100);
     mapRef.current = map;
     return () => { map.remove(); mapRef.current = null; };
   }, []);
+
+  // ── toggle boundaries ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const map   = mapRef.current;
+    const layer = boundaryLayerRef.current;
+    if (!map || !layer) return;
+    if (showBounds) map.addLayer(layer);
+    else            map.removeLayer(layer);
+  }, [showBounds]);
 
   // ── load stations ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -97,7 +124,6 @@ const RadarTab = () => {
   useEffect(() => {
     if (!markersGroupRef.current || !stations.length) return;
 
-    // Use clearLayers() — safe, no eachLayer mutation bug
     markersGroupRef.current.clearLayers();
 
     const visible = search.trim()
@@ -132,7 +158,6 @@ const RadarTab = () => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Increment load ID — any previous load that completes after this point is stale
     const myId = ++loadIdRef.current;
 
     setRadarLoading(true);
@@ -140,31 +165,44 @@ const RadarTab = () => {
     setPlaying(false);
     setFrames([]);
 
-    // Remove old frame layers from map
     frameLayersRef.current.forEach(l => map.removeLayer(l));
     frameLayersRef.current = [];
-    loadedRef.current = new Set();
+    loadedRef.current  = new Set();
+    shownFrameRef.current = -1;
 
     map.setView([stn.lat, stn.lng], 7, { animate: true });
 
     try {
-      const res   = await fetch(`/api/radar/times?station=${stn.id}`);
-      const data  = await res.json();
-      const times = data.times ?? [];
+      const res  = await fetch(`/api/radar/times?station=${stn.id}`);
+      const data = await res.json();
+      const times      = data.times      ?? [];
       const elevations = data.elevations ?? ['0.5'];
 
-      // Stale load — another station was selected before this one finished
       if (loadIdRef.current !== myId) return;
 
       setAvailableTilts(elevations);
       if (!elevations.includes(elev)) {
         elev = elevations[0];
         setTilt(elev);
+        tiltRef.current = elev;
       }
 
       if (!times.length) throw new Error(`No scan data available for ${stn.id}`);
 
       const layerName = `${stn.id.toLowerCase()}_${prod}`;
+
+      const applyTransition = (l) => {
+        if (l._container) l._container.style.transition = 'opacity 0.2s ease-in-out';
+      };
+
+      const showFrame = (idx) => {
+        frameLayersRef.current.forEach((fl, fi) => {
+          applyTransition(fl);
+          fl.setOpacity(fi === idx ? RADAR_OPQ : 0);
+        });
+        shownFrameRef.current = idx;
+      };
+
       const layers = times.map((time, i) => {
         const layer = L.tileLayer.wms(RIDGE2(stn.id), {
           layers:      layerName,
@@ -178,24 +216,24 @@ const RadarTab = () => {
           zIndex:      10,
         }).addTo(map);
 
-        layer.once('load', () => {
+        // Re-mark as loading whenever tiles are re-requested (pan/zoom)
+        layer.on('loading', () => loadedRef.current.delete(i));
+
+        layer.on('load', () => {
           loadedRef.current.add(i);
-          // Apply CSS transition once the container element exists
-          if (layer._container) {
-            layer._container.style.transition = 'opacity 0.2s ease-in-out';
-          }
+          applyTransition(layer);
+          if (frameIdxRef.current === i) showFrame(i);
         });
 
         return layer;
       });
 
-      // Show most-recent frame as soon as it loads; others stay hidden until animation
-      const lastIdx = times.length - 1;
-      layers[lastIdx].once('load', () => {
-        layers[lastIdx].setOpacity(RADAR_OPQ);
-      });
-
       frameLayersRef.current = layers;
+      // Directly set the last frame visible — setFrameIdx may not trigger the
+      // effect if the value hasn't changed (e.g. prev station had same frame count).
+      frameIdxRef.current = times.length - 1;
+      layers[times.length - 1]?.setOpacity(RADAR_OPQ);
+
       setFrames(times);
       setFrameIdx(times.length - 1);
       setPlaying(true);
@@ -209,16 +247,47 @@ const RadarTab = () => {
     }
   }, []);
 
+  // Keep refs in sync for use in intervals
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { productRef.current  = product;  }, [product]);
+  useEffect(() => { tiltRef.current     = tilt;     }, [tilt]);
+
   useEffect(() => {
     if (selected) loadRadar(selected, product, tilt);
   }, [selected, product, tilt, loadRadar]);
 
+  // ── auto-refresh every 60 s ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selected) return;
+    const id = setInterval(() => {
+      if (selectedRef.current) {
+        loadRadar(selectedRef.current, productRef.current, tiltRef.current);
+      }
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [selected, loadRadar]);
+
   // ── show only current frame ────────────────────────────────────────────────
   useEffect(() => {
-    frameLayersRef.current.forEach((l, i) => {
-      if (l._container) l._container.style.transition = 'opacity 0.2s ease-in-out';
-      l.setOpacity(i === frameIdx ? RADAR_OPQ : 0);
-    });
+    frameIdxRef.current = frameIdx;
+    const layers = frameLayersRef.current;
+    if (!layers.length) return;
+
+    if (loadedRef.current.has(frameIdx)) {
+      layers.forEach((l, i) => {
+        if (l._container) l._container.style.transition = 'opacity 0.2s ease-in-out';
+        l.setOpacity(i === frameIdx ? RADAR_OPQ : 0);
+      });
+      shownFrameRef.current = frameIdx;
+    } else {
+      // Tiles not ready — keep last good frame visible while new frame loads
+      layers.forEach((l, i) => {
+        if (l._container) l._container.style.transition = 'opacity 0.2s ease-in-out';
+        if (i === frameIdx)                   l.setOpacity(RADAR_OPQ);
+        else if (i === shownFrameRef.current) l.setOpacity(RADAR_OPQ);
+        else                                  l.setOpacity(0);
+      });
+    }
   }, [frameIdx]);
 
   // ── animation loop ─────────────────────────────────────────────────────────
@@ -227,12 +296,11 @@ const RadarTab = () => {
     if (playing && frames.length > 1) {
       animRef.current = setInterval(() => {
         setFrameIdx(cur => {
-          // Walk forward until we find a loaded frame (max full loop)
           for (let step = 1; step <= frames.length; step++) {
             const next = (cur + step) % frames.length;
             if (loadedRef.current.has(next)) return next;
           }
-          return cur; // no loaded frame found yet — hold
+          return cur;
         });
       }, ANIM_MS);
     }
@@ -301,12 +369,12 @@ const RadarTab = () => {
   // ── render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-3 flex-wrap shrink-0">
+      <div className="flex items-center gap-2 flex-wrap shrink-0">
         <input
           type="text" value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Filter stations…"
-          className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-44 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
+          className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-mono px-3 py-1.5 rounded w-36 md:w-44 placeholder-gray-600 focus:outline-none focus:border-amber-400/60 transition-colors"
         />
         {PRODUCTS.map(p => (
           <button key={p.id} onClick={() => setProduct(p.id)}
@@ -318,6 +386,14 @@ const RadarTab = () => {
             {p.label}
           </button>
         ))}
+        <button onClick={() => setShowBounds(v => !v)}
+          className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+            showBounds
+              ? 'border-sky-500 text-sky-400 bg-sky-500/10'
+              : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+          }`}>
+          STATES
+        </button>
         <button onClick={() => setShowWarnings(w => !w)}
           className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
             showWarnings
@@ -364,7 +440,7 @@ const RadarTab = () => {
         )}
       </div>
 
-      <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: '70vh' }}>
+      <div className="relative rounded border border-gray-700 overflow-hidden" style={{ height: 'clamp(300px, 58vh, 70vh)' }}>
         {!selected && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
             <p className="text-xs text-gray-600 tracking-widest uppercase">Click a station label to load radar</p>

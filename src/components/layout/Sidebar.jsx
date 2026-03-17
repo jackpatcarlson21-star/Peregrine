@@ -12,7 +12,7 @@ const NAV_ITEMS = [
 ];
 
 const Sidebar = ({ activeTab, setTab }) => (
-  <aside className="w-48 shrink-0 bg-gray-950 border-r border-gray-800 flex flex-col">
+  <aside className="hidden md:flex w-48 shrink-0 bg-gray-950 border-r border-gray-800 flex-col">
     {/* Logo */}
     <div className="px-4 py-5 border-b border-gray-800">
       <div className="text-amber-400 font-bold text-lg tracking-widest uppercase">Peregrine</div>

@@ -8,6 +8,9 @@ import MesoTab from './components/tabs/MesoTab';
 import SoundingsTab from './components/tabs/SoundingsTab';
 import SurfaceTab from './components/tabs/SurfaceTab';
 import LightningTab from './components/tabs/LightningTab';
+import {
+  CloudLightning, Radar, AlertTriangle, Wind, BarChart2, Map, Zap,
+} from 'lucide-react';
 
 const TAB_TITLES = {
   [TABS.OUTLOOK]:   'SPC SEVERE WEATHER OUTLOOK',
@@ -18,6 +21,16 @@ const TAB_TITLES = {
   [TABS.SURFACE]:   'SURFACE OBSERVATIONS',
   [TABS.LIGHTNING]: 'LIGHTNING STRIKES',
 };
+
+const MOBILE_NAV = [
+  { id: TABS.OUTLOOK,   label: 'OUTLOOK',  Icon: CloudLightning },
+  { id: TABS.RADAR,     label: 'RADAR',    Icon: Radar          },
+  { id: TABS.STORM_RPT, label: 'REPORTS',  Icon: AlertTriangle  },
+  { id: TABS.MESO,      label: 'MESO',     Icon: Wind           },
+  { id: TABS.SOUNDINGS, label: 'SNDNGS',   Icon: BarChart2      },
+  { id: TABS.SURFACE,   label: 'SURFACE',  Icon: Map            },
+  { id: TABS.LIGHTNING, label: 'LTNG',     Icon: Zap            },
+];
 
 const COMPONENTS = {
   [TABS.OUTLOOK]:   OutlookTab,
@@ -35,24 +48,51 @@ const App = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-gray-950">
+      {/* Desktop sidebar */}
       <Sidebar activeTab={activeTab} setTab={setActiveTab} />
 
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Header */}
-        <header className="flex items-center justify-between px-6 py-3 border-b border-gray-800 shrink-0">
-          <h1 className="text-sm font-bold tracking-widest text-gray-300 uppercase">
+        <header className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-gray-800 shrink-0">
+          {/* Mobile: show logo */}
+          <span className="md:hidden text-amber-400 font-bold text-sm tracking-widest uppercase">
+            Peregrine
+          </span>
+          <h1 className="hidden md:block text-sm font-bold tracking-widest text-gray-300 uppercase">
             {TAB_TITLES[activeTab]}
           </h1>
-          <span className="text-xs text-gray-600 tracking-wider">
-            {new Date().toUTCString().replace(':00 GMT', 'Z').slice(0, -4)}
+          {/* Mobile: show tab title (truncated) */}
+          <h1 className="md:hidden text-xs font-bold tracking-widest text-gray-300 uppercase truncate mx-3 flex-1">
+            {TAB_TITLES[activeTab]}
+          </h1>
+          <span className="text-xs text-gray-600 tracking-wider shrink-0">
+            {new Date().toUTCString().slice(17, 22)}Z
           </span>
         </header>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
+        {/* Content — leave room for mobile bottom nav */}
+        <div className="flex-1 overflow-y-auto p-3 md:p-6 pb-[72px] md:pb-6">
           {ActiveComponent && <ActiveComponent />}
         </div>
       </main>
+
+      {/* Mobile bottom nav */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-gray-950 border-t border-gray-800 flex">
+        {MOBILE_NAV.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex-1 flex flex-col items-center justify-center py-2 gap-0.5 transition-colors min-w-0 ${
+              activeTab === id
+                ? 'text-amber-400'
+                : 'text-gray-600 active:text-gray-300'
+            }`}
+          >
+            <Icon size={18} strokeWidth={activeTab === id ? 2.5 : 1.5} />
+            <span className="text-[9px] font-bold tracking-wider leading-none">{label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 };
