@@ -16,7 +16,7 @@ const PRODUCTS = [
 ];
 
 const NWS_ALERTS_API = 'https://api.weather.gov/alerts/active';
-const WARNINGS_REFRESH_MS = 60_000;
+const WARNINGS_REFRESH_MS = 15_000;
 
 const WARNING_STYLES = {
   'Tornado Warning': {
@@ -29,6 +29,36 @@ const WARNING_STYLES = {
 
 const RADAR_OPQ = 0.85;
 const ANIM_MS   = 400;
+
+const DIR_DEGREES = {
+  N:0, NNE:22.5, NE:45, ENE:67.5, E:90, ESE:112.5, SE:135, SSE:157.5,
+  S:180, SSW:202.5, SW:225, WSW:247.5, W:270, WNW:292.5, NW:315, NNW:337.5,
+};
+
+const parseStormMotion = (str) => {
+  if (!str) return null;
+  const match = str.match(/([NSEW]+)\s+at\s+(\d+(?:\.\d+)?)\s*(MPH|KT|KTS)?/i);
+  if (!match) return null;
+  const dir = match[1].toUpperCase();
+  const speed = parseFloat(match[2]);
+  const unit = (match[3] || 'MPH').toUpperCase();
+  const speedMph = (unit === 'KT' || unit === 'KTS') ? Math.round(speed * 1.151) : Math.round(speed);
+  const bearing = DIR_DEGREES[dir];
+  if (bearing === undefined) return null;
+  return { bearing, speedMph, dir };
+};
+
+const makeArrowIcon = (bearing, color) => L.divIcon({
+  html: `<svg width="36" height="36" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+    <g transform="rotate(${bearing},18,18)">
+      <line x1="18" y1="32" x2="18" y2="8" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+      <polygon points="18,3 11,14 25,14" fill="${color}"/>
+    </g>
+  </svg>`,
+  className: '',
+  iconSize: [36, 36],
+  iconAnchor: [18, 18],
+});
 
 const fmtUtc = (iso) => {
   if (!iso) return '----Z';
@@ -66,6 +96,8 @@ const RadarTab = () => {
   const [tilt,           setTilt]           = useState('0.5');
   const [availableTilts, setAvailableTilts] = useState(['0.5']);
   const [showWarnings,   setShowWarnings]   = useState(true);
+  const [warningsUpdatedAt, setWarningsUpdatedAt] = useState(null);
+  const arrowMarkersRef     = useRef([]);
 
   // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -321,6 +353,11 @@ const RadarTab = () => {
         map.removeLayer(warningsLayerRef.current);
         warningsLayerRef.current = null;
       }
+      arrowMarkersRef.current.forEach(m => map.removeLayer(m));
+      arrowMarkersRef.current = [];
+
+      setWarningsUpdatedAt(new Date());
+
       if (!geojson.features?.length) return;
 
       const layer = L.geoJSON(geojson, {
@@ -328,14 +365,16 @@ const RadarTab = () => {
           const evt = feature.properties?.event;
           return WARNING_STYLES[evt] || WARNING_STYLES['Severe Thunderstorm Warning'];
         },
-        onEachFeature: (feature, layer) => {
+        onEachFeature: (feature, lyr) => {
           const p = feature.properties;
           if (!p) return;
           const isTor = p.event === 'Tornado Warning';
           const expires = p.expires ? new Date(p.expires).toUTCString() : 'Unknown';
-          layer.bindPopup(
+          const color = isTor ? '#FF1111' : '#FFD700';
+
+          lyr.bindPopup(
             `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;max-width:320px;line-height:1.5">
-              <div style="font-weight:bold;font-size:13px;color:${isTor ? '#FF1111' : '#FFD700'};margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
+              <div style="font-weight:bold;font-size:13px;color:${color};margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
                 ${p.event || 'WARNING'}
               </div>
               <div style="color:#d1d5db;margin-bottom:6px">${p.headline || ''}</div>
@@ -344,6 +383,22 @@ const RadarTab = () => {
             </div>`,
             { maxWidth: 350 }
           );
+
+          // Storm motion arrow — drawn at polygon centroid once layer is on the map
+          const motionStr = p.parameters?.stormMotion?.[0];
+          const motion = parseStormMotion(motionStr);
+          if (motion) {
+            lyr.on('add', () => {
+              const center = lyr.getBounds().getCenter();
+              const arrowMarker = L.marker(center, {
+                icon: makeArrowIcon(motion.bearing, color),
+                interactive: false,
+                zIndexOffset: 1000,
+              });
+              arrowMarker.addTo(map);
+              arrowMarkersRef.current.push(arrowMarker);
+            });
+          }
         },
       }).addTo(map);
 
@@ -359,9 +414,13 @@ const RadarTab = () => {
     if (showWarnings && mapRef.current) {
       fetchWarnings();
       warningsIntervalRef.current = setInterval(fetchWarnings, WARNINGS_REFRESH_MS);
-    } else if (!showWarnings && warningsLayerRef.current && mapRef.current) {
-      mapRef.current.removeLayer(warningsLayerRef.current);
-      warningsLayerRef.current = null;
+    } else if (!showWarnings && mapRef.current) {
+      if (warningsLayerRef.current) {
+        mapRef.current.removeLayer(warningsLayerRef.current);
+        warningsLayerRef.current = null;
+      }
+      arrowMarkersRef.current.forEach(m => mapRef.current.removeLayer(m));
+      arrowMarkersRef.current = [];
     }
     return () => clearInterval(warningsIntervalRef.current);
   }, [showWarnings, fetchWarnings]);
@@ -402,6 +461,11 @@ const RadarTab = () => {
           }`}>
           {showWarnings ? 'WARNINGS ON' : 'WARNINGS OFF'}
         </button>
+        {showWarnings && warningsUpdatedAt && (
+          <span className="text-xs font-mono text-gray-500 shrink-0">
+            UPD {fmtUtc(warningsUpdatedAt.toISOString())}
+          </span>
+        )}
         {availableTilts.length > 1 && (
           <>
             <span className="text-xs font-bold tracking-wider uppercase text-gray-500">TILT</span>
