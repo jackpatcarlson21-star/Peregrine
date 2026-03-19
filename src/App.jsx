@@ -42,8 +42,13 @@ const COMPONENTS = {
   [TABS.LIGHTNING]: LightningTab,
 };
 
+const ZOOM_MIN = 70;
+const ZOOM_MAX = 130;
+const ZOOM_STEP = 5;
+
 const App = () => {
   const [activeTab, setActiveTab] = useState(TABS.OUTLOOK);
+  const [zoom, setZoom] = useState(100);
   const ActiveComponent = COMPONENTS[activeTab];
 
   return (
@@ -65,14 +70,40 @@ const App = () => {
           <h1 className="md:hidden text-xs font-bold tracking-widest text-gray-300 uppercase truncate mx-3 flex-1">
             {TAB_TITLES[activeTab]}
           </h1>
-          <span className="text-xs text-gray-600 tracking-wider shrink-0">
+
+          <div className="hidden md:flex items-center gap-2 ml-4">
+            <button
+              onClick={() => setZoom(z => Math.max(ZOOM_MIN, z - ZOOM_STEP))}
+              className="text-gray-500 hover:text-gray-200 text-lg leading-none select-none px-1"
+              title="Zoom out"
+            >−</button>
+            <input
+              type="range"
+              min={ZOOM_MIN}
+              max={ZOOM_MAX}
+              step={ZOOM_STEP}
+              value={zoom}
+              onChange={e => setZoom(Number(e.target.value))}
+              className="w-24 accent-amber-400"
+            />
+            <button
+              onClick={() => setZoom(z => Math.min(ZOOM_MAX, z + ZOOM_STEP))}
+              className="text-gray-500 hover:text-gray-200 text-lg leading-none select-none px-1"
+              title="Zoom in"
+            >+</button>
+            <span className="text-xs text-gray-600 w-8 text-right">{zoom}%</span>
+          </div>
+
+          <span className="text-xs text-gray-600 tracking-wider shrink-0 ml-4">
             {new Date().toUTCString().slice(17, 22)}Z
           </span>
         </header>
 
         {/* Content — leave room for mobile bottom nav */}
         <div className="flex-1 overflow-y-auto p-3 md:p-6 pb-[72px] md:pb-6">
-          {ActiveComponent && <ActiveComponent />}
+          <div style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top left', width: `${10000 / zoom}%` }}>
+            {ActiveComponent && <ActiveComponent />}
+          </div>
         </div>
       </main>
 
