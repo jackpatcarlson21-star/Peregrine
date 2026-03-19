@@ -17,14 +17,45 @@ const PRODUCTS = [
 
 const NWS_ALERTS_API = 'https://api.weather.gov/alerts/active';
 const WARNINGS_REFRESH_MS = 15_000;
+const NM_TO_M = 1852;
 
 const WARNING_STYLES = {
-  'Tornado Warning': {
-    color: '#FF1111', fillColor: '#FF1111', fillOpacity: 0.18, weight: 2.5,
-  },
-  'Severe Thunderstorm Warning': {
-    color: '#FFD700', fillColor: '#FFD700', fillOpacity: 0.12, weight: 2, dashArray: '6 4',
-  },
+  'Tornado Emergency':               { color: '#FF00FF', fillColor: '#FF00FF', fillOpacity: 0.28, weight: 4 },
+  'PDS Tornado Warning':             { color: '#FF66FF', fillColor: '#FF66FF', fillOpacity: 0.22, weight: 3 },
+  'Tornado Warning':                 { color: '#FF1111', fillColor: '#FF1111', fillOpacity: 0.18, weight: 2.5 },
+  'PDS Severe Thunderstorm Warning': { color: '#FF8C00', fillColor: '#FF8C00', fillOpacity: 0.15, weight: 2.5 },
+  'Severe Thunderstorm Warning':     { color: '#FFD700', fillColor: '#FFD700', fillOpacity: 0.12, weight: 2, dashArray: '6 4' },
+  'Flash Flood Warning':             { color: '#00FF7F', fillColor: '#00FF7F', fillOpacity: 0.10, weight: 1.5, dashArray: '4 3' },
+};
+
+const WARNING_COLORS = {
+  'Tornado Emergency':               '#FF00FF',
+  'PDS Tornado Warning':             '#FF66FF',
+  'Tornado Warning':                 '#FF1111',
+  'PDS Severe Thunderstorm Warning': '#FF8C00',
+  'Severe Thunderstorm Warning':     '#FFD700',
+  'Flash Flood Warning':             '#00FF7F',
+};
+
+const classifyAlert = (feature) => {
+  const evt      = feature.properties?.event || '';
+  const headline = (feature.properties?.headline || '').toUpperCase();
+  const params   = feature.properties?.parameters || {};
+
+  if (evt === 'Tornado Warning') {
+    if (headline.includes('TORNADO EMERGENCY')) return 'Tornado Emergency';
+    if (headline.includes('PARTICULARLY DANGEROUS SITUATION')) return 'PDS Tornado Warning';
+    return 'Tornado Warning';
+  }
+  if (evt === 'Severe Thunderstorm Warning') {
+    const threat = (params.thunderstormDamageThreat?.[0] || '').toUpperCase();
+    if (headline.includes('PARTICULARLY DANGEROUS SITUATION') || threat === 'CONSIDERABLE') {
+      return 'PDS Severe Thunderstorm Warning';
+    }
+    return 'Severe Thunderstorm Warning';
+  }
+  if (evt === 'Flash Flood Warning') return 'Flash Flood Warning';
+  return evt;
 };
 
 const RADAR_OPQ = 0.85;
@@ -97,7 +128,9 @@ const RadarTab = () => {
   const [availableTilts, setAvailableTilts] = useState(['0.5']);
   const [showWarnings,   setShowWarnings]   = useState(true);
   const [warningsUpdatedAt, setWarningsUpdatedAt] = useState(null);
-  const arrowMarkersRef     = useRef([]);
+  const [showRings,      setShowRings]      = useState(true);
+  const arrowMarkersRef = useRef([]);
+  const rangeRingsRef   = useRef([]);
 
   // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -339,12 +372,47 @@ const RadarTab = () => {
     return () => clearInterval(animRef.current);
   }, [playing, frames.length]);
 
+  // ── range rings ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    rangeRingsRef.current.forEach(r => map.removeLayer(r));
+    rangeRingsRef.current = [];
+
+    if (!selected || !showRings) return;
+
+    const added = [];
+    [25, 50, 100].forEach(nm => {
+      const circle = L.circle([selected.lat, selected.lng], {
+        radius: nm * NM_TO_M,
+        color: '#ffffff', weight: 1, opacity: 0.22, fill: false,
+        dashArray: '4 6', interactive: false,
+      }).addTo(map);
+
+      // Label positioned at the top of the ring
+      const labelLat = selected.lat + (nm * NM_TO_M / 111320);
+      const label = L.marker([labelLat, selected.lng], {
+        icon: L.divIcon({
+          html: `<div style="color:#6b7280;font-size:9px;font-family:monospace;white-space:nowrap;text-shadow:0 1px 2px #000">${nm} NM</div>`,
+          className: '', iconAnchor: [14, 8],
+        }),
+        interactive: false,
+      }).addTo(map);
+
+      added.push(circle, label);
+    });
+
+    rangeRingsRef.current = added;
+    return () => { added.forEach(r => map.removeLayer(r)); rangeRingsRef.current = []; };
+  }, [selected, showRings]);
+
   // ── warning polygons ───────────────────────────────────────────────────────
   const fetchWarnings = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
     try {
-      const url = `${NWS_ALERTS_API}?status=actual&event=Severe%20Thunderstorm%20Warning,Tornado%20Warning`;
+      const url = `${NWS_ALERTS_API}?status=actual&event=Severe%20Thunderstorm%20Warning,Tornado%20Warning,Flash%20Flood%20Warning`;
       const res = await fetch(url, { headers: { Accept: 'application/geo+json' } });
       if (!res.ok) throw new Error(`NWS alerts ${res.status}`);
       const geojson = await res.json();
@@ -362,20 +430,20 @@ const RadarTab = () => {
 
       const layer = L.geoJSON(geojson, {
         style: (feature) => {
-          const evt = feature.properties?.event;
-          return WARNING_STYLES[evt] || WARNING_STYLES['Severe Thunderstorm Warning'];
+          const cls = classifyAlert(feature);
+          return WARNING_STYLES[cls] || WARNING_STYLES['Severe Thunderstorm Warning'];
         },
         onEachFeature: (feature, lyr) => {
           const p = feature.properties;
           if (!p) return;
-          const isTor = p.event === 'Tornado Warning';
+          const cls     = classifyAlert(feature);
+          const color   = WARNING_COLORS[cls] || '#FFD700';
           const expires = p.expires ? new Date(p.expires).toUTCString() : 'Unknown';
-          const color = isTor ? '#FF1111' : '#FFD700';
 
           lyr.bindPopup(
             `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;max-width:320px;line-height:1.5">
               <div style="font-weight:bold;font-size:13px;color:${color};margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
-                ${p.event || 'WARNING'}
+                ${cls}
               </div>
               <div style="color:#d1d5db;margin-bottom:6px">${p.headline || ''}</div>
               <div style="color:#9ca3af;font-size:10px"><strong>Area:</strong> ${p.areaDesc || 'N/A'}</div>
@@ -384,10 +452,10 @@ const RadarTab = () => {
             { maxWidth: 350 }
           );
 
-          // Storm motion arrow — drawn at polygon centroid once layer is on the map
+          // Storm motion arrow — only for severe/tornado warnings, not flood
           const motionStr = p.parameters?.stormMotion?.[0];
           const motion = parseStormMotion(motionStr);
-          if (motion) {
+          if (motion && p.event !== 'Flash Flood Warning') {
             lyr.on('add', () => {
               const center = lyr.getBounds().getCenter();
               const arrowMarker = L.marker(center, {
@@ -461,6 +529,16 @@ const RadarTab = () => {
           }`}>
           {showWarnings ? 'WARNINGS ON' : 'WARNINGS OFF'}
         </button>
+        {selected && (
+          <button onClick={() => setShowRings(r => !r)}
+            className={`px-3 py-1.5 text-xs font-bold tracking-wider uppercase rounded border transition-all ${
+              showRings
+                ? 'border-gray-400 text-gray-300 bg-gray-400/10'
+                : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+            }`}>
+            RINGS
+          </button>
+        )}
         {showWarnings && warningsUpdatedAt && (
           <span className="text-xs font-mono text-gray-500 shrink-0">
             UPD {fmtUtc(warningsUpdatedAt.toISOString())}
